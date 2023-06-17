@@ -1,0 +1,343 @@
+EntryPoint (app.js):
+
+The entry point file will be responsible for starting the server and connecting to the database. It will also define the routes for the API.
+
+```app.js
+const express = require('express');
+const mongoose = require('mongoose');
+const bodyParser = require('body-parser');
+const passport = require('passport');
+const cors = require('cors');
+const routes = require('./routes');
+
+const app = express();
+
+// Connect to MongoDB
+mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost/recipe-app', {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+});
+
+// Middleware
+app.use(bodyParser.urlencoded({ extended: false }));
+app.use(bodyParser.json());
+app.use(passport.initialize());
+app.use(cors());
+
+// Routes
+app.use('/api', routes);
+
+// Start server
+const port = process.env.PORT || 5000;
+app.listen(port, () => console.log(`Server running on port ${port}`));
+```
+
+Routes (routes.js):
+
+The routes file will define the endpoints for the API.
+
+```routes.js
+const express = require('express');
+const passport = require('passport');
+const UserController = require('./controllers/UserController');
+const RecipeController = require('./controllers/RecipeController');
+
+const router = express.Router();
+
+// User routes
+router.post('/register', UserController.register);
+router.post('/login', UserController.login);
+router.get('/user', passport.authenticate('jwt', { session: false }), UserController.getUser);
+
+// Recipe routes
+router.get('/recipes', passport.authenticate('jwt', { session: false }), RecipeController.getAllRecipes);
+router.get('/recipes/:id', passport.authenticate('jwt', { session: false }), RecipeController.getRecipeById);
+router.post('/recipes', passport.authenticate('jwt', { session: false }), RecipeController.createRecipe);
+router.put('/recipes/:id', passport.authenticate('jwt', { session: false }), RecipeController.updateRecipe);
+router.delete('/recipes/:id', passport.authenticate('jwt', { session: false }), RecipeController.deleteRecipe);
+router.post('/recipes/:id/share', passport.authenticate('jwt', { session: false }), RecipeController.shareRecipe);
+router.post('/recipes/:id/rate', passport.authenticate('jwt', { session: false }), RecipeController.rateRecipe);
+router.post('/recipes/:id/comment', passport.authenticate('jwt', { session: false }), RecipeController.commentOnRecipe);
+
+module.exports = router;
+```
+
+User Model (User.js):
+
+The User model will define the schema for a user and methods for creating an account, logging in, and logging out.
+
+```User.js
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const { Schema } = mongoose;
+
+const UserSchema = new Schema({
+  name: {
+    type: String,
+    required: true,
+  },
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+  },
+  password: {
+    type: String,
+    required: true,
+  },
+});
+
+UserSchema.pre('save', async function (next) {
+  try {
+    if (this.isModified('password')) {
+      const salt = await bcrypt.genSalt(10);
+      const hash = await bcrypt.hash(this.password, salt);
+      this.password = hash;
+    }
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
+UserSchema.methods.comparePassword = async function (password) {
+  return bcrypt.compare(password, this.password);
+};
+
+UserSchema.methods.generateToken = function () {
+  const payload = {
+    id: this._id,
+    name: this.name,
+    email: this.email,
+  };
+  return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '1h' });
+};
+
+const User = mongoose.model('User', UserSchema);
+
+module.exports = User;
+```
+
+User Controller (UserController.js):
+
+The User controller will handle requests related to user authentication.
+
+```UserController.js
+const User = require('../models/User');
+
+exports.register = async (req, res, next) => {
+  try {
+    const { name, email, password } = req.body;
+    const user = new User({ name, email, password });
+    await user.save();
+    const token = user.generateToken();
+    res.status(201).json({ token });
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.login = async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
+    const isMatch = await user.comparePassword(password);
+    if (!isMatch) {
+      return res.status(401).json({ message: 'Invalid email or password' });
+    }
+    const token = user.generateToken();
+    res.json({ token });
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.getUser = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.id);
+    res.json(user);
+  } catch (error) {
+    next(error);
+  }
+};
+```
+
+Recipe Model (Recipe.js):
+
+The Recipe model will define the schema for a recipe and methods for editing, deleting, and sharing a recipe.
+
+```Recipe.js
+const mongoose = require('mongoose');
+const { Schema } = mongoose;
+
+const RecipeSchema = new Schema({
+  title: {
+    type: String,
+    required: true,
+  },
+  description: {
+    type: String,
+    required: true,
+  },
+  ingredients: {
+    type: [String],
+    required: true,
+  },
+  instructions: {
+    type: [String],
+    required: true,
+  },
+  rating: {
+    type: Number,
+    default: 0,
+  },
+  author: {
+    type: Schema.Types.ObjectId,
+    ref: 'User',
+    required: true,
+  },
+  sharedWith: {
+    type: [{ type: Schema.Types.ObjectId, ref: 'User' }],
+    default: [],
+  },
+  comments: {
+    type: [
+      {
+        author: { type: Schema.Types.ObjectId, ref: 'User' },
+        text: String,
+        createdAt: { type: Date, default: Date.now },
+      },
+    ],
+    default: [],
+  },
+});
+
+const Recipe = mongoose.model('Recipe', RecipeSchema);
+
+module.exports = Recipe;
+```
+
+Recipe Controller (RecipeController.js):
+
+The Recipe controller will handle requests related to recipes.
+
+```RecipeController.js
+const Recipe = require('../models/Recipe');
+const User = require('../models/User');
+
+exports.getAllRecipes = async (req, res, next) => {
+  try {
+    const recipes = await Recipe.find({ author: req.user.id }).populate('author', 'name');
+    res.json(recipes);
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.getRecipeById = async (req, res, next) => {
+  try {
+    const recipe = await Recipe.findById(req.params.id)
+      .populate('author', 'name')
+      .populate('comments.author', 'name');
+    if (!recipe) {
+      return res.status(404).json({ message: 'Recipe not found' });
+    }
+    res.json(recipe);
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.createRecipe = async (req, res, next) => {
+  try {
+    const { title, description, ingredients, instructions } = req.body;
+    const recipe = new Recipe({ title, description, ingredients, instructions, author: req.user.id });
+    await recipe.save();
+    res.status(201).json(recipe);
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.updateRecipe = async (req, res, next) => {
+  try {
+    const { title, description, ingredients, instructions } = req.body;
+    const recipe = await Recipe.findById(req.params.id);
+    if (!recipe) {
+      return res.status(404).json({ message: 'Recipe not found' });
+    }
+    if (recipe.author.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'You are not authorized to edit this recipe' });
+    }
+    recipe.title = title;
+    recipe.description = description;
+    recipe.ingredients = ingredients;
+    recipe.instructions = instructions;
+    await recipe.save();
+    res.json(recipe);
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.deleteRecipe = async (req, res, next) => {
+  try {
+    const recipe = await Recipe.findById(req.params.id);
+    if (!recipe) {
+      return res.status(404).json({ message: 'Recipe not found' });
+    }
+    if (recipe.author.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'You are not authorized to delete this recipe' });
+    }
+    await recipe.remove();
+    res.json({ message: 'Recipe deleted successfully' });
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.shareRecipe = async (req, res, next) => {
+  try {
+    const recipe = await Recipe.findById(req.params.id);
+    if (!recipe) {
+      return res.status(404).json({ message: 'Recipe not found' });
+    }
+    if (recipe.author.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'You are not authorized to share this recipe' });
+    }
+    const user = await User.findOne({ email: req.body.email });
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    if (recipe.sharedWith.includes(user._id)) {
+      return res.status(400).json({ message: 'Recipe already shared with this user' });
+    }
+    recipe.sharedWith.push(user._id);
+    await recipe.save();
+    res.json(recipe);
+  } catch (error) {
+    next(error);
+  }
+};
+
+exports.rateRecipe = async (req, res, next) => {
+  try {
+    const recipe = await Recipe.findById(req.params.id);
+    if (!recipe) {
+      return res.status(404).json({ message: 'Recipe not found' });
+    }
+    if (recipe.author.toString() === req.user.id) {
+      return res.status(400).json({ message: 'You cannot rate your own recipe' });
+    }
+    if (recipe.rating > 0 && recipe.ratingCount.includes(req.user.id)) {
+      return res.status(400).json({ message: 'You have already rated this recipe' });
+    }
+    recipe.ratingCount.push(req.user.id);
+    recipe.rating = (recipe.rating + req.body.rating) / recipe.ratingCount.length;
+    await recipe.save();
+    res.json(recipe);
+  } catch (error
